@@ -87,10 +87,59 @@ int8_t fast_sin(uint16_t i) {
   return sin_table[i>>8];
 }
 
-// This is a layer update callback where compositing will take place
-static void layer_update_callback(Layer *layer, GContext *ctx) {
-  GRect bounds = layer_get_frame(layer);
+// take values in the +/-1<<9 range
+// remap them to the 0..32 range somehow
+int32_t remap(int32_t x) {
+  x = (x>>7)+(1<<2); // 0..7
+  int32_t result[] = { 0, 4, 2, 6, 1, 5, 3, 7 };
+  if (MODEL)
+    return result[x]*2+18; // pale or you can't see model
+  return result[x]*4+2; // darker
+}
 
+void plasma_effect(GBitmap *bitmap) {
+  // int16_t w = bitmap->bounds.size.w;
+  int16_t h = bitmap->bounds.size.h;
+  uint32_t stride = bitmap->row_size_bytes;
+  uint8_t *bytes = bitmap->addr;
+
+  static uint16_t fx0, fx1, fy0, fy1;
+  uint16_t y0 = fy0, y1 = fy1;
+  for (int y = 0; y < h; ++y) {
+    int32_t plasma0 = fast_sin(y0) + fast_sin(y1);
+
+    uint16_t x0 = fx0, x1 = fx1;
+    for (uint16_t i = 0; i < stride; ++i) {
+      uint8_t buf = 0;
+      for (uint16_t j = 0; j < 8; j += PLASMA_STRIDE) {
+        // compute plasma
+        int32_t plasma = plasma0 + fast_sin(x0) + fast_sin(x1);
+        // remap into bands
+        plasma = remap(plasma);
+        // or PLASMA_MASK bits of dither into buf
+        buf |= dither[plasma][y%4] & (PLASMA_MASK << j);
+
+        x0 += PLASMA_SCALE*PLASMA_STRIDE*47;
+        x1 += PLASMA_SCALE*PLASMA_STRIDE*26;
+      }
+      bytes[y*stride+i] = buf;
+    }
+    y0 += PLASMA_SCALE*9;
+    y1 += PLASMA_SCALE*33;
+  }
+
+  fx0 += PLASMA_SPEED*77;
+  fy0 += PLASMA_SPEED*93;
+  fx1 += PLASMA_SPEED*-12;
+  fy1 += PLASMA_SPEED*17;
+}
+
+void draw_plasma(GContext *ctx, GRect bounds) {
+  plasma_effect(s_image);
+  graphics_draw_bitmap_in_rect(ctx, s_image, bounds);
+}
+
+void draw_model(GContext *ctx) {
   // the rotation around z
   static int32_t anglez = 0;
   static int32_t anglex = 0;
@@ -115,6 +164,14 @@ static void layer_update_callback(Layer *layer, GContext *ctx) {
   anglez += MODEL_SPEED*50;
 }
 
+// This is a layer update callback where compositing will take place
+static void layer_update_callback(Layer *layer, GContext *ctx) {
+  GRect bounds = layer_get_frame(layer);
+
+  draw_plasma(ctx, bounds);
+  draw_model(ctx);
+}
+
 static void up_click_handler(ClickRecognizerRef recognizer, void *context) {
 }
 
@@ -126,6 +183,12 @@ static void click_config_provider(void *context) {
   window_single_click_subscribe(BUTTON_ID_DOWN, down_click_handler);
 }
 
+void handle_timer(void *p) {
+  (void)p;
+  layer_mark_dirty(s_image_layer);
+  app_timer_register(3 /* ms, bad things happen with 0 or 1 */, handle_timer, NULL);
+}  
+
 static void main_window_load(Window *window) {
   Layer *window_layer = window_get_root_layer(s_main_window);
   GRect bounds = layer_get_frame(window_layer);
@@ -135,18 +198,13 @@ static void main_window_load(Window *window) {
   layer_add_child(window_layer, s_image_layer);
 
   s_image = gbitmap_create_with_resource(RESOURCE_ID_IMAGE_PUG);
+  app_timer_register(3 /* ms, bad things happen with 0 or 1 */, handle_timer, NULL);
 }
 
 static void main_window_unload(Window *window) {
   gbitmap_destroy(s_image);
   layer_destroy(s_image_layer);
 }
-
-void handle_timer(void *p) {
-  (void)p;
-  layer_mark_dirty(s_image_layer);
-  app_timer_register(3 /* ms, bad things happen with 0 or 1 */, handle_timer, NULL);
-}  
 
 static void init() {
   dither_init();
@@ -159,7 +217,6 @@ static void init() {
     .unload = main_window_unload,
   });
   window_stack_push(s_main_window, true);
-  app_timer_register(3 /* ms, bad things happen with 0 or 1 */, handle_timer, NULL);
 }
 
 static void deinit() {
